@@ -30,6 +30,16 @@ class AudioMessageRequest(BaseModel):
     mime_type: str = Field(
         default="audio/wav", description="Mime type hint for the uploaded audio."
     )
+    # Optional chunking support: when recording in small blobs, the client can
+    # send chunks and set `is_last=True` on the final chunk. The server will
+    # assemble chunks server-side and only run ASR when the final chunk is
+    # received.
+    chunk_index: Optional[int] = Field(
+        default=None, description="Index of this chunk (0-based)."
+    )
+    is_last: bool = Field(
+        default=False, description="True when this is the final chunk for the session upload."
+    )
 
 
 class SentimentResult(BaseModel):

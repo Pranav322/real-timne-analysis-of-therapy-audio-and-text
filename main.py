@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 
 from fastapi import FastAPI, HTTPException
+import logging
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,6 +27,9 @@ from app.services import (
     ProsodyAnalyzer,
 )
 from app.store import SessionNotFoundError, SessionStore
+from fastapi import Response
+import tempfile
+from pathlib import Path
 
 settings = get_settings()
 
@@ -34,6 +38,8 @@ app = FastAPI(
     version="0.1.0",
     description="College-level MVP for multimodal therapy session analysis.",
 )
+
+logger = logging.getLogger("uvicorn.error")
 
 app.add_middleware(
     CORSMiddleware,
@@ -133,7 +139,61 @@ async def add_audio_message(
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    audio_bytes = base64.b64decode(payload.audio_base64)
+    # Helpful debug logging to diagnose invalid audio / mime_type issues.
+    logger.info(
+        "Incoming audio request: session=%s mime_type=%s b64_len=%d",
+        session_id,
+        payload.mime_type,
+        len(payload.audio_base64 or ""),
+    )
+    try:
+        audio_bytes = base64.b64decode(payload.audio_base64)
+    except Exception as exc:  # pragma: no cover - runtime validation
+        logger.exception("Base64 decode failed for session=%s", session_id)
+        raise HTTPException(status_code=400, detail="Invalid base64 audio payload")
+
+    # Log first bytes to help identify format (will appear in server logs).
+    try:
+        logger.info(
+            "Audio sample (first 32 bytes hex): %s",
+            audio_bytes[:32].hex(),
+        )
+    except Exception:
+        logger.debug("Unable to log audio sample bytes")
+
+    # If the client is sending chunked WebM/Opus blobs (MediaRecorder with
+    # timeslice), we need to assemble them server-side. If chunk_index is
+    # present and is_last is False, append the bytes to a temp file and return
+    # 202 Accepted so the client can continue sending chunks. When is_last is
+    # True, append the final chunk and proceed with transcription on the
+    # assembled file.
+    chunk_dir = Path(tempfile.gettempdir()) / "therapy_audio_chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_file = chunk_dir / f"{session_id}.upload"
+
+    if payload.chunk_index is not None:
+        # Append chunk to the session file.
+        try:
+            with chunk_file.open("ab") as fh:
+                fh.write(audio_bytes)
+        except OSError as exc:
+            logger.exception("Failed to append audio chunk for %s", session_id)
+            raise HTTPException(status_code=500, detail="Unable to store audio chunk")
+
+        if not payload.is_last:
+            # Intermediate chunk — acknowledge and return early.
+            return Response(status_code=202)
+
+        # Final chunk: read the assembled file as the full audio payload.
+        try:
+            with chunk_file.open("rb") as fh:
+                audio_bytes = fh.read()
+        finally:
+            try:
+                chunk_file.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Could not delete chunk file %s", chunk_file)
+
     try:
         transcript = await transcribe_audio(
             audio_base64=payload.audio_base64,
