@@ -66,7 +66,7 @@ class Settings(BaseModel):
         description="Gemini model ID used for sentiment calls.",
     )
     transcription_provider: str = Field(
-        default=os.getenv("TRANSCRIPTION_PROVIDER", "openai"),
+        default=os.getenv("TRANSCRIPTION_PROVIDER", "local"),
         description="Preferred transcription backend: 'openai' or 'local'.",
     )
     local_asr_model_name: str = Field(

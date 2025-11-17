@@ -4,7 +4,6 @@ from .gemini_client import GeminiService
 from .hf_client import HuggingFaceService
 from .lexicon import LexiconSentiment
 from .local_vosk import LocalVoskTranscriber
-from .openai_client import OpenAIService
 from .prosody import ProsodyAnalyzer, ProsodyResult
 
 __all__ = [
@@ -15,7 +14,6 @@ __all__ = [
     "InsightEngine",
     "LexiconSentiment",
     "LocalVoskTranscriber",
-    "OpenAIService",
     "ProsodyAnalyzer",
     "ProsodyResult",
 ]

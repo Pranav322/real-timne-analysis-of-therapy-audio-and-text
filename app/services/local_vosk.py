@@ -99,6 +99,20 @@ class LocalVoskTranscriber:
             src_path.unlink(missing_ok=True)
         return dst_path
 
+    def convert_to_wav_bytes(self, audio_bytes: bytes, mime_type: str) -> bytes:
+        """Convert arbitrary input audio bytes to a mono 16k WAV and return the bytes.
+
+        This wraps the existing _convert_to_wav helper and ensures the temporary
+        WAV file is cleaned up. Raises RuntimeError with a helpful message when
+        conversion fails (ffmpeg missing or input invalid).
+        """
+        wav_path = self._convert_to_wav(audio_bytes, mime_type)
+        try:
+            with wav_path.open("rb") as f:
+                return f.read()
+        finally:
+            wav_path.unlink(missing_ok=True)
+
     @staticmethod
     def _guess_extension(mime_type: str) -> str:
         mapping = {

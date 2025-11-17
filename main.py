@@ -23,7 +23,6 @@ from app.services import (
     InsightEngine,
     LexiconSentiment,
     LocalVoskTranscriber,
-    OpenAIService,
     ProsodyAnalyzer,
 )
 from app.store import SessionNotFoundError, SessionStore
@@ -51,11 +50,6 @@ hf_service = HuggingFaceService(
 )
 insight_engine = InsightEngine()
 prosody_analyzer = ProsodyAnalyzer()
-openai_service = OpenAIService(
-    api_key=settings.openai_api_key,
-    model=settings.openai_whisper_model,
-    text_model=settings.openai_sentiment_model,
-)
 crisis_detector = CrisisDetector()
 lexicon_service = LexiconSentiment()
 gemini_service = GeminiService(
@@ -63,11 +57,9 @@ gemini_service = GeminiService(
     model=settings.gemini_sentiment_model,
 )
 transcription_provider = settings.transcription_provider.lower()
-use_openai_transcriber = bool(
-    settings.openai_api_key and transcription_provider == "openai"
-)
 local_transcriber: LocalVoskTranscriber | None = None
-if transcription_provider == "local" or not use_openai_transcriber:
+# Default to local transcriber unless explicitly configured otherwise.
+if transcription_provider == "local":
     local_transcriber = LocalVoskTranscriber(
         model_name=settings.local_asr_model_name,
         model_url=settings.local_asr_model_url,
@@ -156,7 +148,20 @@ async def add_audio_message(
     if crisis_signal.triggered:
         sentiment.label = "negative"
         sentiment.score = min(sentiment.score, 0.2)
-    prosody = prosody_analyzer.analyze(audio_bytes)
+    # Prosody analyzer expects readable PCM/WAV data (libsndfile). Convert
+    # compressed inputs (webm/opus, mp3, etc.) to a mono 16k WAV first so
+    # soundfile can parse them reliably.
+    try:
+        wav_bytes = audio_bytes
+        if local_transcriber is not None:
+            # run conversion in threadpool to avoid blocking the event loop
+            wav_bytes = await run_in_threadpool(
+                local_transcriber.convert_to_wav_bytes, audio_bytes, payload.mime_type
+            )
+        prosody = prosody_analyzer.analyze(wav_bytes)
+    except RuntimeError as err:
+        # surface a clear 400-level error for conversion/read failures
+        raise HTTPException(status_code=400, detail=f"Audio processing error: {err}")
     stress = StressResult(
         label=prosody.label,
         score=prosody.score,
@@ -201,13 +206,9 @@ async def compute_sentiment(text: str) -> SentimentResult:
         except RuntimeError:
             pass
 
-    # Optional OpenAI classifier.
-    if settings.use_openai_sentiment and settings.openai_api_key:
-        try:
-            sentiment_data = await openai_service.classify_sentiment(cleaned)
-            return _normalize_sentiment_payload(sentiment_data)
-        except RuntimeError:
-            pass
+    # Optional: OpenAI sentiment has been removed from the default flow. If you
+    # absolutely need OpenAI-based sentiment, re-enable it manually. For now,
+    # we prefer Hugging Face -> Gemini -> lexical fallback.
 
     # Offline fallback (VADER-based).
     lexical = lexicon_service.score(cleaned)
@@ -232,19 +233,12 @@ async def transcribe_audio(
     audio_bytes: bytes,
     mime_type: str,
 ) -> str:
-    if use_openai_transcriber:
-        try:
-            return await openai_service.transcribe(
-                audio_base64=audio_base64,
-                mime_type=mime_type,
-            )
-        except RuntimeError:
-            if not local_transcriber:
-                raise
+    # Use the local Vosk transcriber by default. OpenAI-based transcription has
+    # been removed from the default flow to avoid unauthorized API calls.
     if local_transcriber:
         return await run_in_threadpool(
             local_transcriber.transcribe, audio_bytes, mime_type
         )
     raise RuntimeError(
-        "Transcription requires either OPENAI_API_KEY or TRANSCRIPTION_PROVIDER=local with ffmpeg installed."
+        "Transcription requires TRANSCRIPTION_PROVIDER=local with ffmpeg installed."
     )
